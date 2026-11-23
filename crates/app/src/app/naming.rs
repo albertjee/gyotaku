@@ -793,6 +793,7 @@ impl Gyotaku {
         let target = row.target.clone();
         div()
             .id(("naming-row", index))
+            .w_full()
             .h(px(68.))
             .px_3()
             .flex()
@@ -847,6 +848,7 @@ impl Gyotaku {
                     .id(("naming-target", index))
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .px_2()
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         if let Page::Naming(naming) = &mut this.page {
