@@ -827,7 +827,7 @@ impl Gyotaku {
             )
             .child(
                 div()
-                    .w(px(230.))
+                    .w(px(180.))
                     .min_w_0()
                     .overflow_hidden()
                     .flex()
@@ -862,7 +862,7 @@ impl Gyotaku {
             )
             .child(
                 div()
-                    .w(px(96.))
+                    .w(px(80.))
                     .min_w_0()
                     .overflow_hidden()
                     .text_xs()
