@@ -798,6 +798,7 @@ impl Gyotaku {
             .flex()
             .items_center()
             .gap_3()
+            .overflow_hidden()
             .border_b_1()
             .border_color(theme.hairline)
             .bg(if keyboard_focused {
@@ -862,6 +863,8 @@ impl Gyotaku {
             .child(
                 div()
                     .w(px(96.))
+                    .min_w_0()
+                    .overflow_hidden()
                     .text_xs()
                     .text_color(theme.muted)
                     .whitespace_nowrap()
