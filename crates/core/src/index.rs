@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{
@@ -98,6 +99,8 @@ impl Index {
     }
 
     fn init(db: Connection) -> Result<Self> {
+        // The app, reader, and CLI can open or update the same index at once.
+        db.busy_timeout(Duration::from_secs(5))?;
         // WAL so the watcher can write while the app is reading.
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
@@ -988,6 +991,26 @@ mod tests {
             paths(&idx.search("eviocgrab", 10).unwrap()),
             ["/shots/pr.png"]
         );
+    }
+
+    #[test]
+    fn another_process_can_open_while_the_index_is_busy() {
+        let dir = std::env::temp_dir().join(format!("gyotaku-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.db");
+        let mut first = Index::open(&path).unwrap();
+        let tx = first.write().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            Index::open(&path).map(|_| ())
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(tx);
+        second.join().unwrap().unwrap();
+        drop(first);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
