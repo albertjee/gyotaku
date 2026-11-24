@@ -21,7 +21,7 @@ use crate::platform::{self, Service};
 use crate::setup::{self, Candidate, Counts};
 use crate::theme::Theme;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Key {
     Up,
     Down,
@@ -252,8 +252,12 @@ impl Gyotaku {
         // While a shortcut listens no keys are bound, so this can only be a
         // click, somewhere else. That's a change of mind.
         self.stop_recording(cx);
+        if matches!(self.page, Page::Naming(_)) {
+            self.naming_key(key, window, cx);
+            return;
+        }
         match &mut self.page {
-            Page::Search => {}
+            Page::Search | Page::Naming(_) => {}
             Page::Settings(s) => {
                 let rows = s.rows();
                 let row = rows.get(s.cursor).copied();
@@ -372,6 +376,17 @@ impl Gyotaku {
 
     /// Esc: onboarding steps back, settings goes back to searching.
     pub(super) fn panel_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Page::Naming(naming) = &mut self.page {
+            if naming.applying {
+                self.flash("Renaming images, please wait", cx);
+            } else if naming.editing.take().is_some() {
+                window.focus(&self.panel_focus, cx);
+                cx.notify();
+            } else {
+                self.leave_panel(window, cx);
+            }
+            return;
+        }
         match &mut self.page {
             Page::Onboarding(o) if o.step == Step::Background => {
                 o.step = Step::Folders;
@@ -381,6 +396,7 @@ impl Gyotaku {
             // Nothing to go back to before the first step, so it just hides,
             // and the next summon lands here again.
             Page::Onboarding(_) => window.remove_window(),
+            Page::Naming(_) => unreachable!(),
             Page::Settings(_) => self.leave_panel(window, cx),
             Page::Search => {}
         }
@@ -479,9 +495,24 @@ impl Gyotaku {
     pub(super) fn panel_key_down(
         &mut self,
         e: &KeyDownEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Page::Naming(naming) = &self.page {
+            let key = &e.keystroke;
+            if key.key == "tab"
+                && !key.modifiers.control
+                && !key.modifiers.alt
+                && !key.modifiers.platform
+            {
+                cx.stop_propagation();
+                self.naming_step(key.modifiers.shift, window, cx);
+            } else if key.key == "space" && !key.modifiers.modified() && naming.editing.is_none() {
+                cx.stop_propagation();
+                self.naming_key(Key::Space, window, cx);
+            }
+            return;
+        }
         let Page::Settings(s) = &self.page else {
             return;
         };
@@ -834,7 +865,7 @@ impl Gyotaku {
                 self.save(config, cx);
                 self.flash("added, the watcher starts reading it now", cx);
             }
-            Page::Search => {}
+            Page::Search | Page::Naming(_) => {}
         }
         cx.notify();
     }
@@ -850,7 +881,7 @@ impl Gyotaku {
                 }
                 &mut o.cursor
             }
-            Page::Search => return,
+            Page::Search | Page::Naming(_) => return,
         };
         if *cursor != at {
             *cursor = at;
