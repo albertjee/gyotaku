@@ -1,10 +1,12 @@
 use std::ffi::OsString;
-use std::io::BufRead as _;
+use std::io::{BufRead as _, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
+
+use crate::clipboard::MAX_CLIPBOARD_BYTES;
 
 pub fn become_idle() {
     unsafe {
@@ -25,9 +27,8 @@ pub fn release_memory() {
     }
 }
 
-/// inotify doesn't drop events without saying so (an overflow already
-/// triggers a full look), so there's no need to look again on a timer.
-pub const RESCAN_EVERY: Option<Duration> = None;
+/// A periodic look also retries folders that were unavailable at startup.
+pub const RESCAN_EVERY: Option<Duration> = Some(Duration::from_secs(180));
 
 pub fn denied(folder: &str) -> String {
     format!("can't read {folder}, permission denied")
@@ -92,7 +93,7 @@ impl Drop for ClipboardWatch {
     }
 }
 
-pub fn watch_clipboard(found: mpsc::Sender<Vec<u8>>) -> ClipboardWatch {
+pub fn watch_clipboard(found: mpsc::SyncSender<(u64, Vec<u8>)>, generation: u64) -> ClipboardWatch {
     let (stop, wait) = mpsc::channel::<()>();
     let stopped = Arc::new(AtomicBool::new(false));
     let wl_paste = Arc::new(Mutex::new(None));
@@ -107,8 +108,10 @@ pub fn watch_clipboard(found: mpsc::Sender<Vec<u8>>) -> ClipboardWatch {
             let mut said = None;
             loop {
                 let (again, why) = match session() {
-                    Some(Session::Wayland(display)) => wayland(&display, &found, &wl_paste),
-                    Some(Session::X11) => x11(&found, &stopped),
+                    Some(Session::Wayland(display)) => {
+                        wayland(&display, &found, generation, &wl_paste)
+                    }
+                    Some(Session::X11) => x11(&found, generation, &stopped),
                     None => (Duration::from_secs(30), "no desktop session to watch yet"),
                 };
                 if stopped.load(Ordering::Relaxed) {
@@ -175,7 +178,8 @@ fn is_wayland_socket(name: &str) -> bool {
 /// leaves it in a file and prints the path, see `clipboard::hand_over`.
 fn wayland(
     display: &OsString,
-    found: &mpsc::Sender<Vec<u8>>,
+    found: &mpsc::SyncSender<(u64, Vec<u8>)>,
+    generation: u64,
     slot: &Mutex<Option<Child>>,
 ) -> (Duration, &'static str) {
     let (Ok(exe), Ok(data)) = (std::env::current_exe(), gyotaku_core::data_dir()) else {
@@ -234,10 +238,14 @@ fn wayland(
         if std::mem::take(&mut skip) {
             continue;
         }
-        if let Ok(bytes) = bytes
-            && found.send(bytes).is_err()
-        {
-            break;
+        if let Ok(bytes) = bytes {
+            match found.try_send((generation, bytes)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    eprintln!("clipboard: busy, skipped a copied image")
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => break,
+            }
         }
     }
     if let Some(mut child) = slot.lock().expect("not poisoned").take() {
@@ -252,7 +260,11 @@ fn wayland(
 /// Waits for XFixes to say the clipboard has a new owner, then reads it with
 /// xclip. A dropped watch notices at the next change, since the wait for an
 /// X event can't be interrupted from outside.
-fn x11(found: &mpsc::Sender<Vec<u8>>, stopped: &AtomicBool) -> (Duration, &'static str) {
+fn x11(
+    found: &mpsc::SyncSender<(u64, Vec<u8>)>,
+    generation: u64,
+    stopped: &AtomicBool,
+) -> (Duration, &'static str) {
     use x11rb::connection::Connection as _;
     use x11rb::protocol::Event;
     use x11rb::protocol::xfixes::{ConnectionExt as _, SelectionEventMask};
@@ -301,11 +313,13 @@ fn x11(found: &mpsc::Sender<Vec<u8>>, stopped: &AtomicBool) -> (Duration, &'stat
             continue;
         }
         match xclip_image() {
-            Ok(Some(bytes)) => {
-                if found.send(bytes).is_err() {
-                    return (Duration::ZERO, "stopped");
+            Ok(Some(bytes)) => match found.try_send((generation, bytes)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    eprintln!("clipboard: busy, skipped a copied image")
                 }
-            }
+                Err(mpsc::TrySendError::Disconnected(_)) => return (Duration::ZERO, "stopped"),
+            },
             Ok(None) => {}
             Err(_) => {
                 return (
@@ -321,21 +335,38 @@ fn x11(found: &mpsc::Sender<Vec<u8>>, stopped: &AtomicBool) -> (Duration, &'stat
 /// left alone (they're files already), as is anything a password manager
 /// marked as secret. Err only when xclip can't be run at all.
 fn xclip_image() -> std::io::Result<Option<Vec<u8>>> {
-    let read = |target: &str| {
-        Command::new("xclip")
+    let read = |target: &str| -> std::io::Result<Option<Vec<u8>>> {
+        let mut child = Command::new("xclip")
             .args(["-selection", "clipboard", "-o", "-t", target])
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .output()
+            .spawn()?;
+        let mut bytes = Vec::new();
+        let result = child
+            .stdout
+            .take()
+            .expect("stdout was piped")
+            .take((MAX_CLIPBOARD_BYTES + 1) as u64)
+            .read_to_end(&mut bytes);
+        if result.is_err() || bytes.len() > MAX_CLIPBOARD_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            result?;
+            eprintln!("clipboard: image is too large to save");
+            return Ok(None);
+        }
+        Ok((child.wait()?.success() && !bytes.is_empty()).then_some(bytes))
     };
-    let targets = read("TARGETS")?;
-    let targets = String::from_utf8_lossy(&targets.stdout);
+    let Some(targets) = read("TARGETS")? else {
+        return Ok(None);
+    };
+    let targets = String::from_utf8_lossy(&targets);
     let offered = |t: &str| targets.lines().any(|l| l.trim() == t);
     if !offered("image/png") || offered("text/uri-list") || offered("x-kde-passwordManagerHint") {
         return Ok(None);
     }
-    let png = read("image/png")?;
-    Ok((png.status.success() && !png.stdout.is_empty()).then_some(png.stdout))
+    read("image/png")
 }
 
 #[cfg(test)]

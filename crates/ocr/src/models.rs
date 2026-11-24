@@ -1,7 +1,8 @@
-use std::fs;
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +27,8 @@ pub struct Download {
 type Watcher = Box<dyn Fn(Download) + Send>;
 
 static WATCHER: Mutex<Option<Watcher>> = Mutex::new(None);
+static NEXT_PART: AtomicU64 = AtomicU64::new(0);
+const MAX_DOWNLOAD: usize = 128 << 20;
 
 /// Has `f` called as a model or the runtime downloads, a few times a second
 /// at most, so a window can show how far along it is instead of nothing for
@@ -35,8 +38,13 @@ pub fn watch_downloads(f: impl Fn(Download) + Send + 'static) {
 }
 
 fn tell(download: Download) {
-    if let Some(f) = WATCHER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    let watcher = WATCHER.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(f) = watcher {
         f(download);
+        let mut current = WATCHER.lock().unwrap_or_else(|e| e.into_inner());
+        if current.is_none() {
+            *current = Some(f);
+        }
     }
 }
 
@@ -229,7 +237,12 @@ fn extract(archive: &[u8], inner: &str) -> Result<Option<Vec<u8>>> {
         let mut entry = entry?;
         if entry.path()?.as_ref() == Path::new(inner) {
             let mut lib = Vec::new();
-            entry.read_to_end(&mut lib)?;
+            entry
+                .take((MAX_DOWNLOAD + 1) as u64)
+                .read_to_end(&mut lib)?;
+            if lib.len() > MAX_DOWNLOAD {
+                bail!("runtime library is too large");
+            }
             return Ok(Some(lib));
         }
     }
@@ -239,11 +252,14 @@ fn extract(archive: &[u8], inner: &str) -> Result<Option<Vec<u8>>> {
 #[cfg(windows)]
 fn extract(archive: &[u8], inner: &str) -> Result<Option<Vec<u8>>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
-    let Ok(mut file) = zip.by_name(inner) else {
+    let Ok(file) = zip.by_name(inner) else {
         return Ok(None);
     };
     let mut lib = Vec::new();
-    file.read_to_end(&mut lib)?;
+    file.take((MAX_DOWNLOAD + 1) as u64).read_to_end(&mut lib)?;
+    if lib.len() > MAX_DOWNLOAD {
+        bail!("runtime library is too large");
+    }
     Ok(Some(lib))
 }
 
@@ -271,11 +287,14 @@ fn fetch(file: &'static str, url: &str, sha256: &str) -> Result<Vec<u8>> {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    if total.is_some_and(|size| size > MAX_DOWNLOAD as u64) {
+        bail!("{url} is too large");
+    }
     let mut body = response.into_body().into_reader();
 
     // Read in pieces rather than in one go, only so there's something to
     // report along the way.
-    let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(256 << 20) as usize);
+    let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
     let mut piece = vec![0u8; 64 << 10];
     let mut told = 0;
     tell(Download {
@@ -289,6 +308,9 @@ fn fetch(file: &'static str, url: &str, sha256: &str) -> Result<Vec<u8>> {
             .with_context(|| format!("downloading {url}"))?;
         if n == 0 {
             break;
+        }
+        if bytes.len() > MAX_DOWNLOAD - n {
+            bail!("{url} is too large");
         }
         bytes.extend_from_slice(&piece[..n]);
         if bytes.len() - told >= REPORT_EVERY {
@@ -319,12 +341,50 @@ fn fetch(file: &'static str, url: &str, sha256: &str) -> Result<Vec<u8>> {
 /// like a real one.
 fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(path.parent().context("no parent folder")?)?;
-    // Named per process, so two first runs at once (the app and the watcher,
-    // say) can't write into the same half-finished file.
-    let mut part = path.as_os_str().to_owned();
-    part.push(format!(".{}.part", std::process::id()));
-    let part = PathBuf::from(part);
-    fs::write(&part, bytes)?;
-    fs::rename(&part, path)?;
-    Ok(())
+    let (part, mut file) = loop {
+        let mut part = path.as_os_str().to_owned();
+        let id = NEXT_PART.fetch_add(1, Ordering::Relaxed);
+        part.push(format!(".{}-{id}.part", std::process::id()));
+        let part = PathBuf::from(part);
+        match OpenOptions::new().write(true).create_new(true).open(&part) {
+            Ok(file) => break (part, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        drop(file);
+        fs::rename(&part, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn progress_callback_can_replace_itself() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let first = calls.clone();
+        watch_downloads(move |_| {
+            first.fetch_add(1, Ordering::Relaxed);
+            watch_downloads(|_| {});
+        });
+        let report = Download {
+            file: "test",
+            done: 0,
+            total: None,
+        };
+        tell(report);
+        tell(report);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        WATCHER.lock().unwrap_or_else(|e| e.into_inner()).take();
+    }
 }

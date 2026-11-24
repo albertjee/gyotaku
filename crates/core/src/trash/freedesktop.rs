@@ -50,7 +50,7 @@ pub fn restore(t: &Trashed) -> Result<()> {
     if let Some(dir) = t.original.parent() {
         fs::create_dir_all(dir)?;
     }
-    fs::rename(&t.file, &t.original)
+    crate::naming::rename_no_overwrite(&t.file, &t.original)
         .with_context(|| format!("can't put back {}", t.original.display()))?;
     let _ = fs::remove_file(&t.info);
     Ok(())
@@ -152,7 +152,7 @@ fn put(path: &Path, trash: &Path, top: Option<&Path>) -> Result<Trashed> {
         }
         let moved = f
             .write_all(body.as_bytes())
-            .and_then(|_| fs::rename(path, &file));
+            .and_then(|_| crate::naming::rename_no_overwrite(path, &file));
         if let Err(e) = moved {
             let _ = fs::remove_file(&info);
             return Err(e).with_context(|| format!("can't move {} to the trash", path.display()));

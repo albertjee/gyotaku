@@ -67,7 +67,11 @@ pub fn detect(session: &mut Session, img: &RgbImage) -> Result<Vec<Region>> {
 /// read every word the paddle sizing did on my test set. See notes.md.
 fn input_size(w: u32, h: u32) -> (u32, u32) {
     let (w, h) = (w as f32, h as f32);
-    let scale = (MAX_PIXELS as f32 / (w * h)).sqrt().min(1.0);
+    let scale = (MAX_PIXELS as f32 / (w * h))
+        .sqrt()
+        .min(2048.0 / w)
+        .min(2048.0 / h)
+        .min(1.0);
     let round32 = |v: f32| (((v * scale) / 32.0).round() as u32).max(1) * 32;
     (round32(w), round32(h))
 }
@@ -250,6 +254,8 @@ mod tests {
             (3840, 2160),
             (736, 736),
             (40, 9000),
+            (1, 64_000_000),
+            (64_000_000, 1),
         ] {
             let (iw, ih) = input_size(w, h);
             assert!(
@@ -261,6 +267,7 @@ mod tests {
                 iw * ih <= MAX_PIXELS / 10 * 11,
                 "{w}x{h} -> {iw}x{ih} too big"
             );
+            assert!(iw <= 2048 && ih <= 2048);
         }
     }
 

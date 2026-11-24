@@ -141,7 +141,7 @@ fn read_lines(
 }
 
 fn batch_width(max_ratio: f32) -> u32 {
-    ((HEIGHT as f32 * max_ratio).ceil() as u32).max(MIN_WIDTH)
+    ((HEIGHT as f32 * max_ratio).ceil() as u32).clamp(MIN_WIDTH, BATCH_WIDTH)
 }
 
 /// How wide a line is once scaled to the model's height, within its batch.
@@ -333,5 +333,6 @@ mod tests {
     fn batch_width_never_goes_under_paddles_minimum() {
         assert_eq!(batch_width(0.5), 320);
         assert_eq!(batch_width(10.0), 480);
+        assert_eq!(batch_width(1_000_000.0), BATCH_WIDTH);
     }
 }

@@ -298,7 +298,34 @@ pub fn open_image(path: &Path) -> Result<image::DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gyotaku_core::{Index, Shot};
     use rec::Read;
+
+    #[test]
+    #[ignore = "loads the ONNX runtime and OCR models"]
+    fn a_real_screenshot_returns_a_search_result() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/settings.png")
+            .canonicalize()
+            .unwrap();
+        let image = image::open(&path).unwrap().to_rgb8();
+        let lines = Ocr::new(2, &[]).unwrap().read(&image).unwrap();
+        let mut index = Index::open_in_memory().unwrap();
+        index
+            .insert(
+                &Shot {
+                    path: path.clone(),
+                    mtime: 0,
+                    width: image.width(),
+                    height: image.height(),
+                    look: None,
+                },
+                &lines,
+            )
+            .unwrap();
+        let hits = index.search("cores", 10).unwrap();
+        assert!(hits.iter().any(|hit| hit.path == path));
+    }
 
     fn read(text: &str, score: f32, gap: usize) -> Read {
         Read {

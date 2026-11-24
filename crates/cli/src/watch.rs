@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
@@ -28,9 +28,6 @@ struct Watch {
     /// forgetting right away would throw out the text of a file that only
     /// moved.
     leaving: HashMap<PathBuf, Instant>,
-    /// The last thing renamed away, for pairing with the new name when the
-    /// two arrive as separate events.
-    last_from: Option<PathBuf>,
     /// Folders that appeared (made, or moved in) whose files no event will
     /// ever mention: the watch on them starts after they were filled.
     arrived: Vec<PathBuf>,
@@ -147,7 +144,6 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
         folders: fixed.clone().unwrap_or(config.reading_folders()),
         pending: HashMap::new(),
         leaving: HashMap::new(),
-        last_from: None,
         arrived: Vec::new(),
         rescan: false,
         roots: Vec::new(),
@@ -166,8 +162,11 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
         }
         let _ = tx.send(event);
     })?;
+    let mut unwatched = HashSet::new();
     for dir in &w.folders {
-        watch_folder(&mut watcher, dir);
+        if !watch_folder(&mut watcher, dir) {
+            unwatched.insert(dir.clone());
+        }
     }
     if follow_config && let Some(dir) = config_path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -226,6 +225,7 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
             Err(e) => {
                 eprintln!("file watcher: {e}");
                 w.rescan = true;
+                unwatched.extend(w.folders.iter().cloned());
             }
         };
         // Block for as long as there is nothing else to do.
@@ -273,6 +273,7 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
                 .collect();
             for gone in &gone {
                 let _ = watcher.unwatch(gone);
+                unwatched.remove(gone);
                 backlog
                     .retain(|p| !p.starts_with(gone) || folders.iter().any(|f| p.starts_with(f)));
                 let dropped = w.forget_under(gone, &folders);
@@ -286,11 +287,15 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
             // (~/Pictures/Screenshots after removing ~/Pictures).
             if !gone.is_empty() {
                 for dir in folders.iter().filter(|f| !added.contains(f)) {
-                    watch_folder(&mut watcher, dir);
+                    if !watch_folder(&mut watcher, dir) {
+                        unwatched.insert(dir.clone());
+                    }
                 }
             }
             for dir in &added {
-                watch_folder(&mut watcher, dir);
+                if !watch_folder(&mut watcher, dir) {
+                    unwatched.insert(dir.clone());
+                }
                 // Newly added folders go to the front, it's what was just asked for.
                 for path in indexer::scan(std::slice::from_ref(dir)).into_iter().rev() {
                     if w.indexer.needs_reading(&path) {
@@ -348,6 +353,12 @@ pub fn run(fixed: Option<Vec<PathBuf>>, threads: Option<usize>) -> Result<()> {
             // A folder can come and go (a drive, a symlink retargeted), and
             // so can permission to read it.
             w.roots = real_roots(&w.folders);
+            w.forget_the_gone(follow_config);
+            for dir in unwatched.clone() {
+                if watch_folder(&mut watcher, &dir) {
+                    unwatched.remove(&dir);
+                }
+            }
             let was = denied.len();
             denied = unreadable(&w.folders);
             if denied.len() != was && caught_up && !paused {
@@ -495,10 +506,16 @@ impl Power {
 
 /// A folder that isn't there (an unplugged drive, a typo in the config) is
 /// reported and skipped rather than taking the whole watcher down.
-fn watch_folder(watcher: &mut impl Watcher, dir: &Path) {
+fn watch_folder(watcher: &mut impl Watcher, dir: &Path) -> bool {
     match watcher.watch(dir, RecursiveMode::Recursive) {
-        Ok(()) => eprintln!("watching {}", dir.display()),
-        Err(e) => eprintln!("can't watch {}: {e}", dir.display()),
+        Ok(()) => {
+            eprintln!("watching {}", dir.display());
+            true
+        }
+        Err(e) => {
+            eprintln!("can't watch {}: {e}", dir.display());
+            false
+        }
     }
 }
 
@@ -542,7 +559,7 @@ impl Watch {
         for path in paths {
             let folder = self.folders.iter().find(|f| path.starts_with(f));
             let gone = match folder {
-                Some(folder) => folder.is_dir() && !path.exists(),
+                Some(folder) => folder.is_dir() && matches!(path.try_exists(), Ok(false)),
                 None => follow_config,
             };
             if gone {
@@ -655,29 +672,14 @@ impl Watch {
                     self.pending.remove(path);
                     self.leaving.insert(path.clone(), now);
                 }
-                self.last_from = event.paths.last().cloned();
             }
             // A rename inside the watched folders, finally with both names.
             EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
                 let (from, to) = (event.paths[0].clone(), event.paths[1].clone());
                 self.renamed(&from, &to, now);
             }
-            // Windows never sends both names together: the new one comes
-            // right after the old one, so they're paired here. inotify sends
-            // the pair afterwards as well, which then finds nothing left to
-            // do.
-            EventKind::Modify(ModifyKind::Name(RenameMode::To))
-                if self
-                    .last_from
-                    .as_ref()
-                    .is_some_and(|from| self.leaving.contains_key(from)) =>
-            {
-                let from = self.last_from.take().expect("checked above");
-                for to in &event.paths {
-                    self.renamed(&from, to, now);
-                }
-            }
-            // Moved in from outside: a folder brings files nobody mentions.
+            // Separate destination events have no reliable identity to match
+            // with a source. Read them afresh instead of copying unrelated OCR.
             EventKind::Modify(ModifyKind::Name(_)) => {
                 for path in &event.paths {
                     if path.is_dir() {

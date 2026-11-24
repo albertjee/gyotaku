@@ -220,7 +220,12 @@ first_install=true
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-base="https://github.com/$REPO/releases/latest/download"
+release="${GYOTAKU_RELEASE_TAG:-latest}"
+if [ "$release" = latest ]; then
+    base="https://github.com/$REPO/releases/latest/download"
+else
+    base="https://github.com/$REPO/releases/download/$release"
+fi
 step "Downloading gyotaku ($name)"
 download "$base/$name.tar.gz" "$tmp/$name.tar.gz" || fail "couldn't download $base/$name.tar.gz"
 download "$base/$name.tar.gz.sha256" "$tmp/$name.tar.gz.sha256" || fail "couldn't download the checksum"

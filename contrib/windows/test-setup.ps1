@@ -18,7 +18,7 @@ $quiet = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
 # Waits for the process itself. Start-Process -Wait would also wait for what
 # it started, and an update starts gyotaku again, which stays running.
 function Run($file, $arguments) {
-    $p = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+    $p = Start-Process -FilePath $file -ArgumentList $arguments -PassThru -WindowStyle Hidden
     $null = $p.Handle # keeps the exit code readable after it exits
     if (-not $p.WaitForExit(300000)) { throw "$file is still running after 5 minutes" }
     if ($p.ExitCode) { throw "$file exited with $($p.ExitCode)" }
@@ -29,6 +29,18 @@ function Running {
         Where-Object { $_.Path -eq $app }
 }
 
+foreach ($path in @($dir, $link, (Join-Path $env:APPDATA 'gyotaku'), (Join-Path $env:LOCALAPPDATA 'gyotaku'))) {
+    if (Test-Path -LiteralPath $path) { throw "test needs a clean account; gyotaku state already exists at $path" }
+}
+if (Test-Path $uninstallKey) { throw 'test needs a clean account; gyotaku is already installed' }
+if ((Get-ItemProperty $runKey -ErrorAction SilentlyContinue).PSObject.Properties.Name -contains 'gyotaku') {
+    throw 'test needs a clean account; gyotaku already starts with Windows'
+}
+$config = Join-Path $env:APPDATA 'gyotaku\config'
+$configFile = Join-Path $config 'config.toml'
+$createdConfig = $false
+
+try {
 Write-Host 'install'
 Run $Setup ($quiet + '/TASKS=startwithwindows')
 foreach ($f in 'gyotaku-app.exe', 'gyotaku.exe', 'onnxruntime.dll', 'vcruntime140.dll', 'unins000.exe') {
@@ -48,7 +60,7 @@ $out
 if (-not ($out -match 'cores per screenshot')) { throw 'the installed reader did not read the screenshot' }
 
 Write-Host 'update over a running copy'
-Start-Process -FilePath $app -ArgumentList '--background'
+Start-Process -FilePath $app -ArgumentList '--background' -WindowStyle Hidden
 Start-Sleep -Seconds 3
 $before = Running
 if (-not $before) { throw 'gyotaku did not start' }
@@ -62,9 +74,15 @@ Start-Sleep -Milliseconds 500
 
 Write-Host 'uninstall'
 # Settings saved by the app have to survive a silent uninstall.
-$config = Join-Path $env:APPDATA 'gyotaku\config'
 New-Item -ItemType Directory -Force $config | Out-Null
-'theme = "dark"' | Set-Content (Join-Path $config 'config.toml')
+$stream = [IO.File]::Open($configFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+$createdConfig = $true
+try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes('theme = "dark"')
+    $stream.Write($bytes, 0, $bytes.Length)
+} finally {
+    $stream.Dispose()
+}
 Run (Join-Path $dir 'unins000.exe') $quiet
 # The uninstaller finishes from a copy of itself in TEMP, so the folder can
 # outlive the process that was waited for by a moment.
@@ -76,6 +94,14 @@ if (Test-Path $dir) { throw 'the install folder is still there' }
 if (Test-Path $link) { throw 'the Start menu shortcut is still there' }
 if (Test-Path $uninstallKey) { throw 'it is still in Apps and features' }
 if ((Get-ItemProperty $runKey).PSObject.Properties.Name -contains 'gyotaku') { throw 'it still starts with Windows' }
-if (-not (Test-Path (Join-Path $config 'config.toml'))) { throw 'a silent uninstall deleted the settings' }
-Remove-Item -Recurse -Force (Join-Path $env:APPDATA 'gyotaku')
+if (-not (Test-Path $configFile)) { throw 'a silent uninstall deleted the settings' }
 Write-Host 'the setup installs, updates and uninstalls cleanly'
+} finally {
+    Running | Stop-Process -Force -ErrorAction SilentlyContinue
+    if (Test-Path (Join-Path $dir 'unins000.exe')) {
+        Run (Join-Path $dir 'unins000.exe') $quiet
+    }
+    if ($createdConfig -and (Test-Path $configFile) -and (Get-Content -Raw $configFile) -eq 'theme = "dark"') {
+        Remove-Item -LiteralPath $configFile -Force
+    }
+}
