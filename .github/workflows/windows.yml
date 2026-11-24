@@ -57,7 +57,8 @@ jobs:
       - name: build
         run: cargo build --release --locked
       - name: test
-        run: cargo test --release --locked --workspace
+        # Batch naming integration tests share the default on-disk index.
+        run: cargo test --release --locked --workspace -- --test-threads=1
       # Microsoft's own build, checked against the same hash the app pins.
       - name: onnx runtime
         run: |

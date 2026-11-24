@@ -7,36 +7,36 @@ fn fixture_path() -> PathBuf {
 }
 
 fn seed_index_for_file(path: &std::path::Path, title: &str) {
-    if let Ok(mut idx) = gyotaku_core::Index::open_default() {
-        let mtime = path
-            .metadata()
-            .and_then(|m| m.modified())
-            .map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64
-            })
-            .unwrap_or(0);
-        let _ = idx.insert(
-            &gyotaku_core::Shot {
-                path: path.to_path_buf(),
-                mtime,
-                width: 500,
-                height: 500,
-                look: None,
+    let mut idx = gyotaku_core::Index::open_default().expect("open index for test");
+    let mtime = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        })
+        .unwrap_or(0);
+    idx.insert(
+        &gyotaku_core::Shot {
+            path: path.to_path_buf(),
+            mtime,
+            width: 500,
+            height: 500,
+            look: None,
+        },
+        &[gyotaku_core::Line {
+            text: title.to_string(),
+            rect: gyotaku_core::Rect {
+                x: 0.1,
+                y: 0.05,
+                w: 0.8,
+                h: 0.1,
             },
-            &[gyotaku_core::Line {
-                text: title.to_string(),
-                rect: gyotaku_core::Rect {
-                    x: 0.1,
-                    y: 0.05,
-                    w: 0.8,
-                    h: 0.1,
-                },
-                score: 0.95,
-            }],
-        );
-    }
+            score: 0.95,
+        }],
+    )
+    .expect("seed index for test");
 }
 
 #[test]
