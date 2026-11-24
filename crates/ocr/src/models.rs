@@ -234,7 +234,7 @@ pub fn runtime() -> Result<PathBuf> {
 fn extract(archive: &[u8], inner: &str) -> Result<Option<Vec<u8>>> {
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
     for entry in tar.entries()? {
-        let mut entry = entry?;
+        let entry = entry?;
         if entry.path()?.as_ref() == Path::new(inner) {
             let mut lib = Vec::new();
             entry
