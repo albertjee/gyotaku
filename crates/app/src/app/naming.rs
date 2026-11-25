@@ -784,6 +784,10 @@ impl Gyotaku {
             .parent()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        // Text wider than its box only counts as overflow if the box says so, so
+        // size each line from its length (generous per-character widths).
+        let source_w = px(source.chars().count() as f32 * 9.0 + 8.0);
+        let parent_w = px(parent.chars().count() as f32 * 7.0 + 8.0);
         let status = if row.done {
             row.status.clone().unwrap_or_else(|| "Renamed".into())
         } else if row.status.is_none() && row.target.read(cx).content.is_empty() {
@@ -829,19 +833,30 @@ impl Gyotaku {
                     .bg(if selected { theme.text } else { theme.panel }),
             )
             .child(
+                // Scrolls sideways so a long original name or path can be read in
+                // full; the vertical wheel still goes to the list.
                 div()
-                    .w(px(180.))
-                    .min_w_0()
-                    .overflow_hidden()
+                    .id(("naming-source", index))
+                    .w(px(400.))
+                    .flex_none()
+                    .overflow_x_scroll()
                     .flex()
                     .flex_col()
-                    .child(div().whitespace_nowrap().text_ellipsis().child(source))
+                    .items_start()
                     .child(
                         div()
+                            .w(source_w)
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child(source),
+                    )
+                    .child(
+                        div()
+                            .w(parent_w)
+                            .flex_none()
                             .text_xs()
                             .text_color(theme.muted)
                             .whitespace_nowrap()
-                            .text_ellipsis()
                             .child(parent),
                     ),
             )
