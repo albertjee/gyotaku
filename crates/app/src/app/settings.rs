@@ -806,9 +806,11 @@ impl Gyotaku {
         if step_aside {
             window.remove_window();
         }
+        self.picking = true;
         platform::before_picker(cx);
         cx.spawn(async move |this, cx| {
             let result = picked.await;
+            let _ = this.update(cx, |this, _| this.picking = false);
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Ok(Some(paths))) => this.folders_picked(paths, cx),
                 Ok(Ok(None)) => {}

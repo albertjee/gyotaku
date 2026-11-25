@@ -158,6 +158,9 @@ pub struct Gyotaku {
     last_frame: Instant,
     /// Drawn as a floating panel (layer shell) rather than filling a window.
     floating: bool,
+    /// A native picker is open. It takes focus, which must not count as
+    /// clicking away from the launcher.
+    picking: bool,
     appearance: Option<Subscription>,
     activation: Option<Subscription>,
     /// Scroll the selection back into view after the next layout, because
@@ -331,6 +334,7 @@ impl Gyotaku {
             toasts: 0,
             last_frame: Instant::now(),
             floating,
+            picking: false,
             appearance: None,
             activation: None,
             reveal_selected: false,
@@ -382,8 +386,8 @@ impl Gyotaku {
         // Where the launcher window stays on top of everything, clicking away
         // from it has to put it away, like a start menu does.
         self.activation = (self.floating && platform::hides_when_inactive()).then(|| {
-            cx.observe_window_activation(window, |_, window, _| {
-                if !window.is_window_active() {
+            cx.observe_window_activation(window, |this, window, _| {
+                if !this.picking && !window.is_window_active() {
                     window.remove_window();
                 }
             })

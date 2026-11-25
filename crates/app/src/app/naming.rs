@@ -426,9 +426,11 @@ impl Gyotaku {
         if step_aside {
             window.remove_window();
         }
+        self.picking = true;
         platform::before_picker(cx);
         cx.spawn(async move |this, cx| {
             let result = picked.await;
+            let _ = this.update(cx, |this, _| this.picking = false);
             let _ = this.update(cx, |this, cx| match result {
                 Ok(Ok(Some(paths))) => {
                     if paths.is_empty() {
@@ -724,22 +726,22 @@ impl Gyotaku {
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.panel_back(window, cx)))))
             .child(div().flex_1().min_h_0().flex().flex_col().px_4().pt_4()
                 .child(div().text_sm().text_color(theme.muted).child("Review the proposed names, then rename the selected files in place. No copies are made."))
-                .child(div().flex().gap_2().mt_4()
+                .child(div().flex().items_center().gap_2().mt_3()
                     .child(tab("naming-files", "Specific images", !folder_mode, SourceMode::Files))
-                    .child(tab("naming-folder", "Folder", folder_mode, SourceMode::Folder)))
-                .child(div().flex().items_center().justify_between().mt_4().p_3().border_1().border_color(theme.hairline).rounded(px(8.))
+                    .child(tab("naming-folder", "Folder", folder_mode, SourceMode::Folder))
+                    .when(folder_mode, |row| row.child(div().id("naming-recursive").ml_auto().flex().items_center().gap_2().px_2().py_1().border_1()
+                        .border_color(if cursor == 4 { theme.text } else { theme.panel })
+                        .cursor(CursorStyle::PointingHand)
+                        .child(div().w(px(18.)).h(px(18.)).border_1().border_color(theme.text).bg(if include_subfolders { theme.text } else { theme.panel }))
+                        .child("Include subfolders")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_naming_subfolders(cx))))))
+                .child(div().flex().items_center().justify_between().mt_3().p_3().border_1().border_color(theme.hairline).rounded(px(8.))
                     .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().child(if folder_mode { folder } else { format!("{files} specific images") }))
                     .child(div().id("naming-choose").ml_3().px_3().py_2().rounded(px(6.)).border_1()
                         .border_color(if cursor == 3 { theme.text } else { theme.panel })
                         .bg(theme.keycap).cursor(CursorStyle::PointingHand)
                         .child(if folder_mode { "Choose folder" } else { "Choose images" })
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.choose_naming_source(folder_mode, window, cx)))))
-                .when(folder_mode, |panel| panel.child(div().id("naming-recursive").flex().items_center().gap_2().py_3().border_1()
-                    .border_color(if cursor == 4 { theme.text } else { theme.panel })
-                    .cursor(CursorStyle::PointingHand)
-                    .child(div().w(px(18.)).h(px(18.)).border_1().border_color(theme.text).bg(if include_subfolders { theme.text } else { theme.panel }))
-                    .child("Include subfolders")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_naming_subfolders(cx)))))
                 .child(div().flex().items_center().justify_between().mt_3().pb_2().border_b_1().border_color(theme.hairline)
                     .child(div().text_lg().child("Name preview"))
                     .child(div().text_sm().text_color(theme.muted).child(if loading { "Reading images...".into() } else { format!("{total} shown, {selected} selected") })))
@@ -793,6 +795,7 @@ impl Gyotaku {
         let target = row.target.clone();
         div()
             .id(("naming-row", index))
+            .w_full()
             .h(px(68.))
             .px_3()
             .flex()
@@ -847,6 +850,7 @@ impl Gyotaku {
                     .id(("naming-target", index))
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .px_2()
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         if let Page::Naming(naming) = &mut this.page {
