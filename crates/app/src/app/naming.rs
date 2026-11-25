@@ -293,6 +293,23 @@ impl Gyotaku {
         self.show_naming_review(cx);
     }
 
+    /// Ticks every row that has a proposed name, or clears every row. Rows that are
+    /// done or blocked are left alone, same as clicking them one at a time.
+    fn set_naming_selection(&mut self, on: bool, cx: &mut Context<Self>) {
+        if let Page::Naming(naming) = &mut self.page
+            && !naming.applying
+        {
+            for row in naming
+                .rows
+                .iter_mut()
+                .filter(|row| !row.done && (row.status.is_none() || row.failed))
+            {
+                row.selected = on && !row.target.read(cx).content.is_empty();
+            }
+            cx.notify();
+        }
+    }
+
     fn toggle_naming_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Page::Naming(naming) = &mut self.page
             && !naming.applying
@@ -744,7 +761,14 @@ impl Gyotaku {
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.choose_naming_source(folder_mode, window, cx)))))
                 .child(div().flex().items_center().justify_between().mt_3().pb_2().border_b_1().border_color(theme.hairline)
                     .child(div().text_lg().child("Name preview"))
-                    .child(div().text_sm().text_color(theme.muted).child(if loading { "Reading images...".into() } else { format!("{total} shown, {selected} selected") })))
+                    .child(div().flex().items_center().gap_2()
+                        .child(div().id("naming-select-all").px_2().py_1().rounded(px(6.)).border_1().border_color(theme.hairline).text_sm()
+                            .cursor(CursorStyle::PointingHand).hover(move |s| s.bg(theme.hover_wash)).child("Select all")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_naming_selection(true, cx))))
+                        .child(div().id("naming-select-none").px_2().py_1().rounded(px(6.)).border_1().border_color(theme.hairline).text_sm()
+                            .cursor(CursorStyle::PointingHand).hover(move |s| s.bg(theme.hover_wash)).child("Select none")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_naming_selection(false, cx))))
+                        .child(div().text_sm().text_color(theme.muted).child(if loading { "Reading images...".into() } else { format!("{total} shown, {selected} selected") }))))
                 .child(list(list_state, cx.processor(Self::render_naming_row)).flex_1().min_h_0())
                 .child(div().py_2().text_sm().text_color(theme.muted).child("Tab or arrows move between controls. Space selects a row; Enter edits its name. Existing names are blocked."))
                 .when_some(message, |panel, message| panel.child(div().py_2().text_sm().child(message)))
