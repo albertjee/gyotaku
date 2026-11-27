@@ -52,9 +52,13 @@ if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
 # ARM64 Windows runs the x64 build through its built-in emulation.
 $name = 'gyotaku-x86_64-windows'
 $base = "https://github.com/$Repo/releases/latest/download"
+if ($env:GYOTAKU_RELEASE_TAG) {
+    if ($env:GYOTAKU_RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid release tag' }
+    $base = "https://github.com/$Repo/releases/download/$env:GYOTAKU_RELEASE_TAG"
+}
 # $env:GYOTAKU_CHANNEL = 'dev' installs the rolling test build of main
 # instead, which is rebuilt on every change.
-if ($env:GYOTAKU_CHANNEL -eq 'dev') {
+if ($env:GYOTAKU_CHANNEL -eq 'dev' -and -not $env:GYOTAKU_RELEASE_TAG) {
     $base = "https://github.com/$Repo/releases/download/dev"
     Write-Host 'Using the dev build, rebuilt on every change. Not for everyday use.' -ForegroundColor Yellow
 }

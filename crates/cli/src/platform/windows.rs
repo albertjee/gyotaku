@@ -2,6 +2,8 @@ use std::os::windows::fs::MetadataExt as _;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use crate::clipboard::MAX_CLIPBOARD_BYTES;
+
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, GetClipboardData, IsClipboardFormatAvailable,
@@ -79,13 +81,13 @@ impl Drop for ClipboardWatch {
     }
 }
 
-pub fn watch_clipboard(found: mpsc::Sender<Vec<u8>>) -> ClipboardWatch {
+pub fn watch_clipboard(found: mpsc::SyncSender<(u64, Vec<u8>)>, generation: u64) -> ClipboardWatch {
     let (started, thread) = mpsc::channel();
     let _ = std::thread::Builder::new()
         .name("clipboard watch".into())
         .spawn(move || {
-            let _ = started.send(unsafe { GetCurrentThreadId() });
-            if let Err(why) = unsafe { listen(found) } {
+            if let Err(why) = unsafe { listen(found, generation, &started) } {
+                let _ = started.send(0);
                 eprintln!("clipboard: {why}, copied images aren't saved");
             }
         });
@@ -106,15 +108,28 @@ pub fn print_rename_script(commands: &[(&std::path::Path, &std::path::Path, &str
     }
 }
 
+struct Found {
+    sender: mpsc::SyncSender<(u64, Vec<u8>)>,
+    generation: u64,
+}
+
 thread_local! {
-    static FOUND: std::cell::RefCell<Option<mpsc::Sender<Vec<u8>>>> =
-        const { std::cell::RefCell::new(None) };
+    static FOUND: std::cell::RefCell<Option<Found>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Runs the window's message loop until the watch is dropped.
-unsafe fn listen(found: mpsc::Sender<Vec<u8>>) -> Result<(), &'static str> {
+unsafe fn listen(
+    found: mpsc::SyncSender<(u64, Vec<u8>)>,
+    generation: u64,
+    started: &mpsc::Sender<u32>,
+) -> Result<(), &'static str> {
     unsafe {
-        FOUND.with(|f| *f.borrow_mut() = Some(found));
+        FOUND.with(|f| {
+            *f.borrow_mut() = Some(Found {
+                sender: found,
+                generation,
+            })
+        });
         let class: Vec<u16> = "gyotaku clipboard\0".encode_utf16().collect();
         let instance = GetModuleHandleW(std::ptr::null());
         let mut wc: WNDCLASSW = std::mem::zeroed();
@@ -145,6 +160,7 @@ unsafe fn listen(found: mpsc::Sender<Vec<u8>>) -> Result<(), &'static str> {
             DestroyWindow(window);
             return Err("couldn't listen to the clipboard");
         }
+        let _ = started.send(GetCurrentThreadId());
         // The reader runs at idle priority. This thread only copies bytes
         // out when the clipboard changes, so it can afford to be the
         // quickest in the process, before the app that copied replaces or
@@ -169,8 +185,11 @@ unsafe extern "system" fn on_message(
     if message == WM_CLIPBOARDUPDATE {
         if let Some(bytes) = unsafe { clipboard_image() } {
             FOUND.with(|f| {
-                if let Some(found) = &*f.borrow() {
-                    let _ = found.send(bytes);
+                if let Some(found) = &*f.borrow()
+                    && let Err(mpsc::TrySendError::Full(_)) =
+                        found.sender.try_send((found.generation, bytes))
+                {
+                    eprintln!("clipboard: busy, skipped a copied image");
                 }
             });
         }
@@ -194,18 +213,6 @@ fn format(name: &str) -> u32 {
 /// is skipped here too.
 unsafe fn clipboard_image() -> Option<Vec<u8>> {
     unsafe {
-        let private = format("ExcludeClipboardContentFromMonitorProcessing");
-        if IsClipboardFormatAvailable(CF_HDROP) != 0 || IsClipboardFormatAvailable(private) != 0 {
-            return None;
-        }
-        let png = format("PNG");
-        let wanted = if IsClipboardFormatAvailable(png) != 0 {
-            png
-        } else if IsClipboardFormatAvailable(CF_DIB) != 0 {
-            CF_DIB
-        } else {
-            return None;
-        };
         // Whoever copied can still be holding it open for a moment.
         let opened = (0..10).any(|_| {
             let ok = OpenClipboard(std::ptr::null_mut()) != 0;
@@ -217,8 +224,22 @@ unsafe fn clipboard_image() -> Option<Vec<u8>> {
         if !opened {
             return None;
         }
-        let bytes = read(wanted);
+        let private = format("ExcludeClipboardContentFromMonitorProcessing");
+        let png = format("PNG");
+        let wanted = if IsClipboardFormatAvailable(CF_HDROP) != 0
+            || IsClipboardFormatAvailable(private) != 0
+        {
+            None
+        } else if IsClipboardFormatAvailable(png) != 0 {
+            Some(png)
+        } else if IsClipboardFormatAvailable(CF_DIB) != 0 {
+            Some(CF_DIB)
+        } else {
+            None
+        };
+        let bytes = wanted.and_then(|format| read(format));
         CloseClipboard();
+        let wanted = wanted?;
         let bytes = bytes?;
         if wanted == CF_DIB {
             bmp_from_dib(&bytes)
@@ -236,6 +257,9 @@ unsafe fn read(format: u32) -> Option<Vec<u8>> {
             return None;
         }
         let size = GlobalSize(handle);
+        if size > MAX_CLIPBOARD_BYTES {
+            return None;
+        }
         let at = GlobalLock(handle) as *const u8;
         if at.is_null() || size == 0 {
             return None;
@@ -268,8 +292,15 @@ fn bmp_from_dib(dib: &[u8]) -> Option<Vec<u8>> {
         (0, _) => 0,
         _ => used,
     };
-    let offset = 14 + header + masks + palette * 4;
-    let size = 14 + u32::try_from(dib.len()).ok()?;
+    let offset = palette
+        .checked_mul(4)?
+        .checked_add(masks)?
+        .checked_add(header)?
+        .checked_add(14)?;
+    let size = u32::try_from(dib.len()).ok()?.checked_add(14)?;
+    if offset > size {
+        return None;
+    }
     let mut bmp = Vec::with_capacity(size as usize);
     bmp.extend_from_slice(b"BM");
     bmp.extend_from_slice(&size.to_le_bytes());
@@ -307,5 +338,8 @@ mod tests {
         assert_eq!(image.get_pixel(0, 0).0, [0, 0, 255]);
         assert_eq!(image.get_pixel(2, 1).0, [255, 0, 0]);
         assert_eq!(bmp_from_dib(&dib[..10]), None);
+        let mut invalid = dib.clone();
+        invalid[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(bmp_from_dib(&invalid), None);
     }
 }

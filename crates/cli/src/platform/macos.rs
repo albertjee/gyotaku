@@ -90,7 +90,7 @@ pub fn only_in_the_cloud(meta: &std::fs::Metadata) -> bool {
 
 pub struct ClipboardWatch;
 
-pub fn watch_clipboard(_: std::sync::mpsc::Sender<Vec<u8>>) -> ClipboardWatch {
+pub fn watch_clipboard(_: std::sync::mpsc::SyncSender<(u64, Vec<u8>)>, _: u64) -> ClipboardWatch {
     ClipboardWatch
 }
 

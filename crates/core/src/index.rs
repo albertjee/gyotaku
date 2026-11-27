@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{
@@ -98,6 +99,8 @@ impl Index {
     }
 
     fn init(db: Connection) -> Result<Self> {
+        // The app, reader, and CLI can open or update the same index at once.
+        db.busy_timeout(Duration::from_secs(5))?;
         // WAL so the watcher can write while the app is reading.
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
@@ -283,6 +286,20 @@ impl Index {
     /// doesn't change a single pixel. Returns false if `from` wasn't indexed.
     pub fn rename(&mut self, from: &Path, to: &Path) -> Result<bool> {
         let tx = self.write()?;
+        let source_exists = tx
+            .query_row(
+                "SELECT 1 FROM shots WHERE path = ?1",
+                [path_str(from)],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !source_exists {
+            return Ok(false);
+        }
+        if from == to {
+            return Ok(true);
+        }
         delete(&tx, &path_str(to))?;
         let moved = tx.execute(
             "UPDATE shots SET path = ?2 WHERE path = ?1",
@@ -302,7 +319,11 @@ impl Index {
 
     /// Drops every shot whose file is gone, returns how many.
     pub fn prune(&mut self) -> Result<usize> {
-        let gone: Vec<PathBuf> = self.paths()?.into_iter().filter(|p| !p.exists()).collect();
+        let gone: Vec<PathBuf> = self
+            .paths()?
+            .into_iter()
+            .filter(|p| matches!(p.try_exists(), Ok(false)))
+            .collect();
         for p in &gone {
             self.remove(p)?;
         }
@@ -956,6 +977,40 @@ mod tests {
             ["/shots/pr.png"]
         );
         assert!(idx.search("eviocgrab", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_rename_source_keeps_destination() {
+        let mut idx = sample();
+        assert!(
+            !idx.rename(Path::new("/missing.png"), Path::new("/shots/pr.png"))
+                .unwrap()
+        );
+        assert_eq!(idx.len().unwrap(), 2);
+        assert_eq!(
+            paths(&idx.search("eviocgrab", 10).unwrap()),
+            ["/shots/pr.png"]
+        );
+    }
+
+    #[test]
+    fn another_process_can_open_while_the_index_is_busy() {
+        let dir = std::env::temp_dir().join(format!("gyotaku-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.db");
+        let mut first = Index::open(&path).unwrap();
+        let tx = first.write().unwrap();
+        let (started, ready) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            Index::open(&path).map(|_| ())
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(tx);
+        second.join().unwrap().unwrap();
+        drop(first);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

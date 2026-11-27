@@ -1031,19 +1031,24 @@ impl Gyotaku {
         let trashed: Vec<Trashed> = batch.iter().map(|b| b.trashed.clone()).collect();
         let mut back = Vec::new();
         let mut failed = 0;
-        for (b, restored) in batch.iter().zip(trash::restore_all(&trashed)) {
+        let mut retry = Vec::new();
+        for (b, restored) in batch.into_iter().zip(trash::restore_all(&trashed)) {
             match restored {
-                Ok(()) => {
-                    if let Ok(id) = self.index.insert(&b.shot, &b.lines) {
-                        back.push(id);
+                Ok(()) => match self.index.insert(&b.shot, &b.lines) {
+                    Ok(id) => back.push(id),
+                    Err(e) => {
+                        eprintln!("couldn't index restored {}: {e:#}", b.shot.path.display());
+                        failed += 1;
                     }
-                }
+                },
                 Err(e) => {
                     eprintln!("{e:#}");
                     failed += 1;
+                    retry.push(b);
                 }
             }
         }
+        self.undo = retry;
         self.after_change(cx);
         // What came back grows back in, and stays marked so it's plain which
         // ones they were. Only what this search shows, though: a mark on a
@@ -1079,7 +1084,12 @@ impl Gyotaku {
             (n, 0) => format!("put back {}", thousands(n)),
             (n, f) => format!("put back {}, {} couldn't be", thousands(n), thousands(f)),
         };
-        self.flash(message, cx);
+        if self.undo.is_empty() {
+            self.flash(message, cx);
+        } else {
+            let undo = keys::shown("undo", cx);
+            self.flash_with(message, Some((undo, "retry undo")), TOAST_UNDO, cx);
+        }
     }
 
     fn similar(&mut self, _: &Similar, _: &mut Window, cx: &mut Context<Self>) {
